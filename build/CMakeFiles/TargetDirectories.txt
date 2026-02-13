@@ -1,0 +1,3 @@
+/home/jsr/Developer/Vulkan/build/CMakeFiles/main.dir
+/home/jsr/Developer/Vulkan/build/CMakeFiles/edit_cache.dir
+/home/jsr/Developer/Vulkan/build/CMakeFiles/rebuild_cache.dir
