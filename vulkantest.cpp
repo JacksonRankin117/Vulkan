@@ -56,7 +56,7 @@ VulkanState initVulkan(SDL_Window* window) {
            .setApplicationVersion(VK_MAKE_VERSION(1,0,0))
            .setPEngineName("No Engine")
            .setEngineVersion(VK_MAKE_VERSION(1,0,0))
-           .setApiVersion(VK_MAKE_API_VERSION(0, 1, 4, 0));
+           .setApiVersion(VK_API_VERSION_1_3);             // Can't use 1.4 features yet, so we specify version 1.3
 
     // ================================================ SDL Extensions =================================================
     // Get the list of Vulkan instance extensions required by SDL.
