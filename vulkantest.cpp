@@ -10,13 +10,15 @@
 // defines the flags we need to use when creating the window.
 #define SDL_VULKAN_FLAGS (SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY)
 
-// This function dictates the flow of the program.
-void run() {
-    SDL_Window* window = initWindow();
-    initVulkan(window);
-    mainLoop();
-    cleanup(window);
-}
+// Struct to hold Vulkan objects so they survive past initVulkan
+struct VulkanState {
+    vk::raii::Context context{};
+    vk::raii::Instance instance{nullptr};
+    vk::raii::SurfaceKHR surface{nullptr};
+    vk::raii::PhysicalDevice physicalDevice{nullptr};
+    vk::raii::Device device{nullptr};
+    vk::raii::Queue graphicsQueue{nullptr};
+};
 
 // Opens a window
 SDL_Window* initWindow() {
@@ -41,11 +43,12 @@ SDL_Window* initWindow() {
 }
 
 // Initializes Vulkan and creates a Vulkan surface for the given window. Handles errors appropriately.
-void initVulkan(SDL_Window* window) {
+VulkanState initVulkan(SDL_Window* window) {
+    VulkanState state;
+
     // ================================================== Vulkan Setup =================================================
     // RAII Context for Vulkan. Essentially a safer C++ manager for Vulkan
-    vk::raii::Context context;
-
+    state.context = vk::raii::Context{};
 
     // Tell Vulkan about our application.
     vk::ApplicationInfo appInfo{};
@@ -53,32 +56,7 @@ void initVulkan(SDL_Window* window) {
            .setApplicationVersion(VK_MAKE_VERSION(1,0,0))
            .setPEngineName("No Engine")
            .setEngineVersion(VK_MAKE_VERSION(1,0,0))
-           .setApiVersion(VK_MAKE_API_VERSION(0, 1, 4, 0));
-
-
-    // ================================================ SDL Extensions =================================================
-    // Get the list of Vulkan instance extensions required by SDL.
-    Uint32 extCount = 0;
-    const char* const* sdlExts = SDL_Vulkan_GetInstanceExtensions(&extCount);  
-
-    // Handle the case where we fail to get the extensions
-    if (!sdlExts) throw std::runtime_error("Failed to get SDL extensions");
-
-    // Store the extensions in a vector for easier use with Vulkan
-    std::vector<const char*> extensions(sdlExts, sdlExts + extCount);
-
-
-    // ================================================ Vulkan Instance ================================================
-    // Describe the Vulkan instance we want to create. This tells the Vulkan instance about the application and 
-    // the extensions we want to use. We will use the extensions provided by SDL to create a surface for our window.
-    vk::InstanceCreateInfo instanceInfo{};
-    instanceInfo.setPApplicationInfo(&appInfo)
-                .setEnabledExtensionCount(static_cast<uint32_t>(extensions.size()))
-                .setPpEnabledExtensionNames(extensions.data());
-
-    // Create the Vulkan instance
-    vk::raii::Instance instance(context, instanceInfo);
-
+           .setApiVersion(VK_API_VERSION_1_4);
 
     // ================================================ SDL Extensions =================================================
     // Get the list of Vulkan instance extensions required by SDL.
@@ -91,7 +69,6 @@ void initVulkan(SDL_Window* window) {
     // Store the extensions in a vector for easier use with Vulkan
     std::vector<const char*> extensions(sdlExts, sdlExts + extCount);
 
-
     // ================================================ Vulkan Instance ================================================
     // Describe the Vulkan instance we want to create. This tells the Vulkan instance about the application and 
     // the extensions we want to use. We will use the extensions provided by SDL to create a surface for our window.
@@ -101,55 +78,47 @@ void initVulkan(SDL_Window* window) {
                 .setPpEnabledExtensionNames(extensions.data());
 
     // Create the Vulkan instance
-    vk::raii::Instance instance(context, instanceInfo);
-
+    state.instance = vk::raii::Instance(state.context, instanceInfo);
 
     // ==================================================== Surface ====================================================
-
     // Create a Vulkan surface for our window
     VkSurfaceKHR rawSurface;
-    
+
     // SDL_Vulkan_CreateSurface() is a boolean function that checks if the surface was created successfully.
     if (!SDL_Vulkan_CreateSurface(
             window,
-            static_cast<VkInstance>(*instance),
+            static_cast<VkInstance>(*state.instance),
             nullptr,
             &rawSurface))
     {   
         // If we fail to create a surface, throw an error with the SDL error message
-        throw std::runtime_error("Surface creation failed");
+        throw std::runtime_error(SDL_GetError());
     }
 
     // Wrap the raw Vulkan surface 
-    vk::raii::SurfaceKHR surface(instance, rawSurface);
-
+    state.surface = vk::raii::SurfaceKHR(state.instance, rawSurface);
 
     // ================================================ Physical Device ================================================
     // Enumerate through the available GPUs on the computer and pick the first one
-    auto physicalDevices = instance.enumeratePhysicalDevices();
+    auto physicalDevices = state.instance.enumeratePhysicalDevices();
 
     // If the list of GPUs is empty, throw an error
     if (physicalDevices.empty())
         throw std::runtime_error("No GPUs found");
 
     // Move the first GPU into a vk::raii::PhysicalDevice object
-    vk::raii::PhysicalDevice physicalDevice = std::move(physicalDevices.front());
-
+    state.physicalDevice = physicalDevices.front();
 
     // ================================================ Queue Selection ================================================
-    // 
-    auto queueFamilies = physicalDevice.getQueueFamilyProperties();
+    auto queueFamilies = state.physicalDevice.getQueueFamilyProperties();
 
     uint32_t graphicsFamily = UINT32_MAX;
 
     for (uint32_t i = 0; i < queueFamilies.size(); ++i)
     {
-        bool graphics =
-            (queueFamilies[i].queueFlags &
-            vk::QueueFlagBits::eGraphics)
-            != vk::QueueFlags{};
+        bool graphics = (queueFamilies[i].queueFlags & vk::QueueFlagBits::eGraphics) != vk::QueueFlags{};
 
-        bool present = physicalDevice.getSurfaceSupportKHR(i, *surface);
+        bool present = state.physicalDevice.getSurfaceSupportKHR(i, *state.surface);
 
         if (graphics && present)
         {
@@ -160,9 +129,7 @@ void initVulkan(SDL_Window* window) {
 
     if (graphicsFamily == UINT32_MAX) throw std::runtime_error("No suitable queue");
 
-
     // ======================================= Vulkan Device and Queue Creation ========================================
-
     // Set the priority of the queue to 1.0. Vulkan expects an array of priorities, but since we only have one queue, we
     // can just use a single float. The priority is a value between 0.0 and 1.0, where 1.0 is the highest priority.
     float priority = 1.0f;
@@ -173,16 +140,22 @@ void initVulkan(SDL_Window* window) {
              .setQueueCount(1)
              .setPQueuePriorities(&priority);
 
-    // Create the logical device and get the graphics queue
-    vk::DeviceCreateInfo deviceInfo{};
-    deviceInfo.setQueueCreateInfos(queueInfo);
+    // Specify device extensions (needed for presenting)
+    const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
     // Create the logical device. RAII will handle cleanup.
-    vk::raii::Device device(physicalDevice, deviceInfo);
+    vk::DeviceCreateInfo deviceInfo{};
+    deviceInfo.setQueueCreateInfos(queueInfo)
+              .setEnabledExtensionCount(1)
+              .setPpEnabledExtensionNames(deviceExtensions);
+
+    state.device = vk::raii::Device(state.physicalDevice, deviceInfo);
 
     // Get the graphics queue from the device. Since there is only one Queue in the family, we can just get the first 
     // one (index 0).
-    vk::raii::Queue graphicsQueue = device.getQueue(graphicsFamily, 0);
+    state.graphicsQueue = state.device.getQueue(graphicsFamily, 0);
+
+    return state;
 }
 
 // Main loop of the application. This is where we render frames and handle events
@@ -218,6 +191,15 @@ void cleanup(SDL_Window* window) {
 
     SDL_DestroyWindow(window);
     SDL_Quit();
+}
+
+// This function dictates the flow of the program.
+void run() {
+    SDL_Window* window = initWindow();
+    VulkanState vkState = initVulkan(window);
+    mainLoop();
+    cleanup(window);
+
 }
 
 int main()
