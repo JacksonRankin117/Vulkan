@@ -127,21 +127,29 @@ VulkanState initVulkan(SDL_Window* window) {
     // ================================================ Queue Selection ================================================
     auto queueFamilies = state.physicalDevice.getQueueFamilyProperties();
 
+    // Set the graphics family index to something invalid. This is so that if we don't find a queue family that supports
+    // both graphics and presentation, we can detect it and throw an error
     uint32_t graphicsFamily = UINT32_MAX;
 
+    // Iterate through the queue families to find one that supports both graphics and presentation
     for (uint32_t i = 0; i < queueFamilies.size(); ++i)
-    {
+    {   
+        // Check if the queue family supports graphics and presentation.
         bool graphics = (queueFamilies[i].queueFlags & vk::QueueFlagBits::eGraphics) != vk::QueueFlags{};
 
+        // Check if the queue family supports presentation to our surface. This is necessary for rendering to the screen.
         bool present = state.physicalDevice.getSurfaceSupportKHR(i, *state.surface);
-
+        
+        // If this queue family supports both graphics and presentation, we can use it
         if (graphics && present)
-        {
+        {   
+            // Store the index of the queue family and break out of the loop
             graphicsFamily = i;
             break;
         }
     }
 
+    // If we didn't find a suitable queue family, throw an error
     if (graphicsFamily == UINT32_MAX) throw std::runtime_error("No suitable queue");
 
     // ======================================= Vulkan Device and Queue Creation ========================================
@@ -177,7 +185,7 @@ VulkanState initVulkan(SDL_Window* window) {
                  .setMinImageCount(3) // Triple buffering
                  .setImageFormat(vk::Format::eB8G8R8A8Unorm) // Common color format
                  .setImageColorSpace(vk::ColorSpaceKHR::eSrgbNonlinear)
-                 .setImageExtent({800, 600}) // Match your window size
+                 .setImageExtent({800, 600})
                  .setImageArrayLayers(1)
                  .setImageUsage(vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst) 
                  .setPreTransform(vk::SurfaceTransformFlagBitsKHR::eIdentity)
@@ -249,16 +257,80 @@ void mainLoop(VulkanState& state) {
             if (e.type == SDL_EVENT_QUIT)
                 running = false;
         }
-        // Wait 16ms (62.5 fps). Replace with proper frame timing later to reduce stutter.
-        SDL_Delay(16);
+
+        // Frame rendering loop
+        while (running) {
+            // If we detect a quit event, stop the loop
+            while (SDL_PollEvent(&e)) {
+                if (e.type == SDL_EVENT_QUIT) running = false;
+            }
+
+            // Wait for the previous frame to finish on the GPU
+            (void)state.device.waitForFences(*state.inFlightFence, true, UINT64_MAX);
+            state.device.resetFences(*state.inFlightFence);
+
+            // Get the next image from the swapchain. result.first is the image index
+            auto [result, imageIndex] = state.swapchain.acquireNextImage(UINT64_MAX, *state.imageAvailableSemaphore);
+
+            // Record the "Clear Screen" command
+            auto& cmd = state.commandBuffers[0];
+            cmd.reset();
+            cmd.begin({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit });
+
+            // Transition the image so we can clear it (Layout: Undefined -> Transfer Destination)
+            vk::ImageMemoryBarrier barrier{};
+            barrier.setOldLayout(vk::ImageLayout::eUndefined)
+                   .setNewLayout(vk::ImageLayout::eTransferDstOptimal)
+                   .setImage(state.swapchainImages[imageIndex])
+                   .setSubresourceRange({ vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 });
+
+            cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eTransfer, 
+                                {}, nullptr, nullptr, barrier);
+
+            // Paint the image to a color of our choosing. 
+            vk::ClearColorValue clearColor(std::array<float, 4>{ 0.39f, 0.58f, 0.93f, 1.0f }); // Cornflower blue, hehe
+            vk::ImageSubresourceRange range(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1);
+
+            cmd.clearColorImage(state.swapchainImages[imageIndex], 
+                                vk::ImageLayout::eTransferDstOptimal, 
+                                clearColor, 
+                                range);
+
+            // Transition the image so it's ready to be shown (Layout: Transfer Destination -> Present Source)
+            barrier.setOldLayout(vk::ImageLayout::eTransferDstOptimal)
+                   .setNewLayout(vk::ImageLayout::ePresentSrcKHR);
+            
+            cmd.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, 
+                                vk::PipelineStageFlagBits::eBottomOfPipe, 
+                                {}, 
+                                nullptr, 
+                                nullptr, 
+                                barrier);
+            
+            cmd.end();
+
+            // Submit the command buffer to the GPU
+            vk::PipelineStageFlags waitStages[] = { vk::PipelineStageFlagBits::eColorAttachmentOutput };
+            vk::SubmitInfo submitInfo(*state.imageAvailableSemaphore, 
+                                      waitStages, 
+                                      *cmd, 
+                                      *state.renderFinishedSemaphore);
+            
+            state.graphicsQueue.submit(submitInfo, *state.inFlightFence);
+
+            // Present the image back to the swapchain
+            vk::PresentInfoKHR presentInfo(*state.renderFinishedSemaphore, 
+                                           *state.swapchain, 
+                                           imageIndex);
+
+            (void)state.graphicsQueue.presentKHR(presentInfo);
+        }
     }
 }
 
 // The RAII Vulkan wrapper automatically handles Vulkan cleanup, so we only need to destroy SDL resources here.
 void cleanup(SDL_Window* window) {
-    // ==================================================== Cleanup ====================================================
-    // RAII handles Vulkan automatically
-
+    // RAII handles Vulkan automatically, so we just need to clean up SDL resources. Destroy the window and quit SDL.
     SDL_DestroyWindow(window);
     SDL_Quit();
 }
@@ -280,6 +352,9 @@ int main()
     } catch (const std::exception& e) {
         // If we can't run the application, print the error message and exit with a failure code
         std::cerr << "Error: " << e.what() << std::endl;
+
+        // Verbally abuse the user
+        std::cout << "Freaking idiot, you broke something!" << std::endl;
         return EXIT_FAILURE;
     }
     return 0;
