@@ -12,12 +12,27 @@
 
 // Struct to hold Vulkan objects so they survive past initVulkan
 struct VulkanState {
+    // RAII Context for Vulkan. Essentially a safer C++ manager for Vulkan
     vk::raii::Context context{};
     vk::raii::Instance instance{nullptr};
     vk::raii::SurfaceKHR surface{nullptr};
     vk::raii::PhysicalDevice physicalDevice{nullptr};
     vk::raii::Device device{nullptr};
     vk::raii::Queue graphicsQueue{nullptr};
+    
+    // Swapchain and related resources
+    vk::raii::SwapchainKHR swapchain{nullptr};
+    std::vector<vk::Image> swapchainImages; // Handled by swapchain, but we need the handles
+    std::vector<vk::raii::ImageView> swapchainImageViews;
+    
+    // Synchronization
+    vk::raii::Semaphore imageAvailableSemaphore{nullptr};
+    vk::raii::Semaphore renderFinishedSemaphore{nullptr};
+    vk::raii::Fence inFlightFence{nullptr};
+
+    // Command pool and buffers (not used yet, but will be needed for rendering)
+    vk::raii::CommandPool commandPool{nullptr};
+    vk::raii::CommandBuffers commandBuffers{nullptr}; // Usually one per frame or one total
 };
 
 // Opens a window
@@ -155,11 +170,66 @@ VulkanState initVulkan(SDL_Window* window) {
     // one (index 0).
     state.graphicsQueue = state.device.getQueue(graphicsFamily, 0);
 
+    // ==================================================== Swapchain ==================================================
+    // 1. Define the Swapchain settings
+    vk::SwapchainCreateInfoKHR swapchainInfo{};
+    swapchainInfo.setSurface(*state.surface)
+                 .setMinImageCount(3) // Triple buffering
+                 .setImageFormat(vk::Format::eB8G8R8A8Unorm) // Common color format
+                 .setImageColorSpace(vk::ColorSpaceKHR::eSrgbNonlinear)
+                 .setImageExtent({800, 600}) // Match your window size
+                 .setImageArrayLayers(1)
+                 .setImageUsage(vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eTransferDst) 
+                 .setPreTransform(vk::SurfaceTransformFlagBitsKHR::eIdentity)
+                 .setCompositeAlpha(vk::CompositeAlphaFlagBitsKHR::eOpaque)
+                 .setPresentMode(vk::PresentModeKHR::eFifo) // VSync
+                 .setClipped(true);
+
+    state.swapchain = vk::raii::SwapchainKHR(state.device, swapchainInfo);
+
+    // ================================================= Synchronization ===============================================
+    vk::SemaphoreCreateInfo semInfo{};
+    vk::FenceCreateInfo fenceInfo{ vk::FenceCreateFlagBits::eSignaled };
+
+    state.imageAvailableSemaphore = vk::raii::Semaphore(state.device, semInfo);
+    state.renderFinishedSemaphore = vk::raii::Semaphore(state.device, semInfo);
+    state.inFlightFence = vk::raii::Fence(state.device, fenceInfo);
+
+    // ================================================= Image Views ==================================================
+    // 1. Get the image handles from the swapchain
+    state.swapchainImages = state.swapchain.getImages();
+
+    // 2. Create a View for each Image
+    for (const auto& image : state.swapchainImages) {
+        vk::ImageViewCreateInfo viewInfo{};
+        viewInfo.setImage(image)
+                .setViewType(vk::ImageViewType::e2D)
+                .setFormat(vk::Format::eB8G8R8A8Unorm) // Must match swapchain format
+                .setSubresourceRange({ vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 });
+
+        state.swapchainImageViews.push_back(vk::raii::ImageView(state.device, viewInfo));
+    }
+
+    // ================================================= Command Pool =================================================
+    vk::CommandPoolCreateInfo poolInfo{};
+    poolInfo.setQueueFamilyIndex(graphicsFamily)
+            .setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer); // Allows us to reuse the list every frame
+
+    state.commandPool = vk::raii::CommandPool(state.device, poolInfo);
+
+    // Allocate a command buffer
+    vk::CommandBufferAllocateInfo allocInfo{};
+    allocInfo.setCommandPool(*state.commandPool)
+             .setLevel(vk::CommandBufferLevel::ePrimary)
+             .setCommandBufferCount(1);
+
+    state.commandBuffers = vk::raii::CommandBuffers(state.device, allocInfo);
+
     return state;
 }
 
 // Main loop of the application. This is where we render frames and handle events
-void mainLoop() {
+void mainLoop(VulkanState& state) {
     // =================================================== Main Loop ===================================================
 
     // Populate a boolean variable which controls if we are running or not. When we quit, this will be set to false.
@@ -197,7 +267,7 @@ void cleanup(SDL_Window* window) {
 void run() {
     SDL_Window* window = initWindow();
     VulkanState vkState = initVulkan(window);
-    mainLoop();
+    mainLoop(vkState);
     cleanup(window);
 
 }

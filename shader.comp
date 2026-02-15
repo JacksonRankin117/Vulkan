@@ -1,12 +1,13 @@
 #version 450
-
-layout(local_size_x = 1) in;
-
-layout(binding = 0) buffer Data {
-    uint values[];
-} buf;
+layout (local_size_x = 16, local_size_y = 16) in;
+layout (rgba8, binding = 0) writeonly uniform image2D resultImage;
 
 void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    buf.values[idx] = idx * 2; // simple test: write double the index
+    ivec2 texelCoord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(resultImage);
+
+    if (texelCoord.x < size.x && texelCoord.y < size.y) {
+        vec4 color = vec4(float(texelCoord.x) / size.x, float(texelCoord.y) / size.y, 0.0, 1.0);
+        imageStore(resultImage, texelCoord, color);
+    }
 }
